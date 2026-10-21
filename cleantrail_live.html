@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CleanTrail Live Tracking Dashboard</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace']
+          },
+          colors: {
+            brand: { 50:'#f0fdf4',100:'#dcfce7',300:'#86efac',400:'#4ade80',500:'#22c55e',600:'#16a34a',700:'#15803d',900:'#14532d' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .leaflet-container { width: 100%; height: 100%; background: #0b1120 !important; font-family: 'Inter', sans-serif; }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background: #111827 !important; color: #f1f5f9 !important;
+      border: 1px solid #1f2937; box-shadow: 0 10px 30px rgba(0,0,0,.5) !important;
+    }
+    .leaflet-popup-content-wrapper { border-radius: 12px !important; }
+    .leaflet-popup-content { margin: 12px 14px !important; }
+    .leaflet-container a.leaflet-popup-close-button { color: #64748b !important; }
+    .leaflet-control-zoom { border: none !important; box-shadow: 0 4px 16px rgba(0,0,0,.4) !important; border-radius: 10px !important; overflow: hidden; }
+    .leaflet-control-zoom a { background: #111827 !important; color: #cbd5e1 !important; border-color: #1f2937 !important; }
+    .leaflet-control-zoom a:hover { background: #1f2937 !important; }
+    .leaflet-control-attribution { background: rgba(11,17,32,.7) !important; color: #64748b !important; }
+    .leaflet-control-attribution a { color: #94a3b8 !important; }
+
+    /* Make sure circle SVG ignores pointer events so clicks pass through to the map */
+    .leaflet-interactive { pointer-events: auto; }
+    .leaflet-overlay-pane svg path.leaflet-interactive[stroke="#6366f1"] { pointer-events: none !important; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+    /* Robot marker with pulse ring and heading arrow */
+    .robot-wrap { position: relative; width: 44px; height: 44px; }
+    .robot-wrap::before {
+      content: ''; position: absolute; inset: 0; border-radius: 50%;
+      background: rgba(34,197,94,.35); animation: ring 2s ease-out infinite;
+    }
+    @keyframes ring { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(1.8); opacity: 0; } }
+    .robot-heading { position: absolute; inset: 0; transition: transform .4s ease; }
+    .robot-heading::after {
+      content: ''; position: absolute; left: 50%; top: -6px; transform: translateX(-50%);
+      border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 9px solid #4ade80;
+    }
+    .robot-core {
+      position: absolute; inset: 4px; border-radius: 50%; background: #16a34a;
+      border: 2px solid #fff; display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 18px rgba(34,197,94,.6);
+    }
+
+    .modal-panel { animation: pop .18s ease-out; }
+    @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+    .toast { animation: slidein .2s ease-out; }
+    @keyframes slidein { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+
+    .switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch span { position: absolute; inset: 0; background: #334155; border-radius: 999px; transition: .2s; cursor: pointer; }
+    .switch span::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+    .switch input:checked + span { background: #16a34a; }
+    .switch input:checked + span::before { transform: translateX(16px); }
+
+    #compass-needle { transition: transform .4s ease; transform-origin: 50px 50px; }
+  </style>
+</head>
+
+<body class="bg-[#0b1120] text-slate-100 h-screen flex flex-col overflow-hidden antialiased">
+
+  <!-- ==================== HEADER ==================== -->
+  <header class="h-16 bg-slate-950/80 backdrop-blur border-b border-white/5 px-4 sm:px-6 flex items-center justify-between shrink-0 z-20">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg shadow-brand-600/30 shrink-0">
+        <i class="fa-solid fa-robot text-white text-lg"></i>
+      </div>
+      <div class="min-w-0">
+        <h1 class="font-semibold text-base tracking-tight flex items-center gap-2">
+          CleanTrail
+          <span class="hidden sm:inline text-[10px] font-medium px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 ring-1 ring-brand-500/30">IoT</span>
+        </h1>
+        <p class="text-[11px] text-slate-500 truncate">Autonomous Multi-terrain Cleaning &amp; Collection</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <div id="conn-pill" class="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ring-1 bg-amber-500/10 ring-amber-500/30 text-amber-300">
+        <span class="relative flex h-2 w-2">
+          <span id="conn-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+          <span id="conn-dot" class="relative inline-flex rounded-full h-2 w-2 bg-amber-400"></span>
+        </span>
+        <span id="conn-text">Waiting for Raspberry Pi</span>
+      </div>
+      <div class="w-px h-6 bg-white/10 mx-1 hidden md:block"></div>
+      <button onclick="openModal('sms-modal')" title="SMS Alerts" class="h-9 px-3 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-white/5 transition flex items-center gap-2">
+        <i class="fa-solid fa-comment-sms text-brand-400"></i><span class="hidden lg:inline">SMS Alerts</span>
+      </button>
+      <button onclick="openQrModal()" title="QR pairing" class="h-9 px-3 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-white/5 transition flex items-center gap-2">
+        <i class="fa-solid fa-qrcode text-brand-400"></i><span class="hidden lg:inline">QR</span>
+      </button>
+      <button onclick="openModal('station-modal')" class="h-9 px-3 rounded-lg text-sm font-medium bg-brand-600 hover:bg-brand-500 text-white shadow shadow-brand-600/30 transition flex items-center gap-2">
+        <i class="fa-solid fa-plus"></i><span class="hidden sm:inline">Add Station</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ==================== LAYOUT ==================== -->
+  <div class="flex-1 flex flex-col-reverse lg:flex-row overflow-hidden min-h-0">
+
+    <!-- ==================== SIDEBAR ==================== -->
+    <aside class="w-full lg:w-[380px] h-[45vh] lg:h-auto bg-slate-950/60 border-t lg:border-t-0 lg:border-r border-white/5 shrink-0 overflow-y-auto">
+      <div class="p-4 sm:p-5 space-y-5">
+
+        <!-- Unit status -->
+        <section class="rounded-2xl p-4 bg-gradient-to-br from-slate-900 to-slate-900/40 ring-1 ring-white/5 space-y-3">
+          <div class="flex items-start justify-between">
+            <div>
+              <p class="text-[11px] uppercase tracking-wider text-slate-500 font-medium">Unit</p>
+              <p class="font-mono text-sm text-slate-200 mt-0.5">Cleantrail</p>
+            </div>
+            <span id="status-pill" class="text-[11px] font-medium px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 ring-1 ring-white/10">Awaiting Pi</span>
+          </div>
+
+          <button onclick="centerOnRobot()" class="w-full py-2 px-3 rounded-xl bg-brand-600/20 hover:bg-brand-600/30 ring-1 ring-brand-500/40 text-brand-300 text-xs font-medium transition flex items-center justify-center gap-2 cursor-pointer">
+            <i class="fa-solid fa-location-crosshairs text-brand-400"></i> CleanTrail Location
+          </button>
+
+          <p id="last-update" class="text-[11px] text-slate-500 flex items-center gap-1.5 pt-1">
+            <i class="fa-regular fa-clock"></i> No telemetry received yet
+          </p>
+        </section>
+
+        <!-- Telemetry -->
+        <section>
+          <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2.5">Live Telemetry</h2>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="rounded-2xl p-4 bg-slate-900/70 ring-1 ring-white/5">
+              <div class="flex items-center justify-between text-slate-400">
+                <span class="text-xs font-medium">Battery</span>
+                <i id="battery-icon" class="fa-solid fa-battery-empty text-slate-500"></i>
+              </div>
+              <div class="flex items-baseline gap-0.5 mt-3">
+                <span id="battery-val" class="text-3xl font-semibold tabular-nums">--</span>
+                <span class="text-sm text-slate-500">%</span>
+              </div>
+              <div class="w-full bg-slate-800 h-1.5 rounded-full mt-3 overflow-hidden">
+                <div id="battery-bar" class="h-full rounded-full transition-all duration-500" style="width:0%;background:#10b981"></div>
+              </div>
+              <p id="battery-status-text" class="mt-2.5 text-[11px] text-slate-500 flex items-center gap-1.5">
+                <i class="fa-solid fa-plug"></i> Awaiting data
+              </p>
+            </div>
+
+            <div class="rounded-2xl p-4 bg-slate-900/70 ring-1 ring-white/5">
+              <div class="flex items-center justify-between text-slate-400">
+                <span class="text-xs font-medium">Bin Fill</span>
+                <i class="fa-solid fa-trash-can text-slate-500"></i>
+              </div>
+              <div class="flex items-baseline gap-0.5 mt-3">
+                <span id="bin-val" class="text-3xl font-semibold tabular-nums">--</span>
+                <span class="text-sm text-slate-500">%</span>
+              </div>
+              <div class="w-full bg-slate-800 h-1.5 rounded-full mt-3 overflow-hidden">
+                <div id="bin-bar" class="h-full rounded-full transition-all duration-500" style="width:0%;background:#10b981"></div>
+              </div>
+              <p id="bin-status-text" class="mt-2.5 text-[11px] text-slate-500 flex items-center gap-1.5">
+                <i class="fa-solid fa-circle-info"></i> Awaiting data
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Navigation / sensors -->
+        <section class="rounded-2xl p-4 bg-slate-900/70 ring-1 ring-white/5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Navigation</h2>
+            <span class="text-[10px] font-mono text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">gps · compass</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <!-- Compass dial -->
+            <svg viewBox="0 0 100 100" class="w-24 h-24 shrink-0" aria-label="Compass heading">
+              <circle cx="50" cy="50" r="46" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+              <circle cx="50" cy="50" r="36" fill="none" stroke="#1e293b" stroke-width="1" stroke-dasharray="2 4"/>
+              <text x="50" y="15" text-anchor="middle" font-size="9" font-weight="700" fill="#4ade80">N</text>
+              <text x="88" y="53" text-anchor="middle" font-size="8" fill="#64748b">E</text>
+              <text x="50" y="92" text-anchor="middle" font-size="8" fill="#64748b">S</text>
+              <text x="12" y="53" text-anchor="middle" font-size="8" fill="#64748b">W</text>
+              <g id="compass-needle">
+                <polygon points="50,20 55,50 45,50" fill="#22c55e"/>
+                <polygon points="50,80 55,50 45,50" fill="#334155"/>
+              </g>
+              <circle cx="50" cy="50" r="3.5" fill="#e2e8f0"/>
+            </svg>
+            <dl class="flex-1 grid grid-cols-1 gap-2 text-xs">
+              <div class="flex justify-between"><dt class="text-slate-500">Heading</dt><dd id="heading-val" class="font-mono text-slate-200">--</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">Speed</dt><dd id="speed-val" class="font-mono text-slate-200">--</dd></div>
+              <div class="flex justify-between"><dt class="text-slate-500">GPS</dt><dd id="gps-status-val" class="text-slate-400 flex items-center gap-1"><i class="fa-solid fa-satellite-dish"></i> Waiting</dd></div>
+            </dl>
+          </div>
+          <div class="mt-3 flex items-center justify-between bg-slate-950/60 rounded-lg px-3 py-2 ring-1 ring-white/5">
+            <span class="text-[11px] text-slate-500">Position</span>
+            <span id="coords-val" class="font-mono text-xs text-brand-400">--</span>
+          </div>
+        </section>
+
+        <!-- Layers -->
+        <section>
+          <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2.5">Map Layers</h2>
+          <div class="space-y-2">
+            <label class="flex items-center justify-between rounded-xl px-3.5 py-3 bg-slate-900/70 ring-1 ring-white/5 cursor-pointer hover:ring-white/10 transition">
+              <span class="flex items-center gap-3 text-sm">
+                <span class="w-7 h-7 rounded-lg bg-emerald-500/15 text-emerald-400 flex items-center justify-center"><i class="fa-solid fa-charging-station text-xs"></i></span>
+                Charging docks
+                <span id="count-charging" class="text-xs text-slate-500 tabular-nums">0</span>
+              </span>
+              <span class="switch"><input type="checkbox" checked onchange="toggleLayer('charging', this.checked)"><span></span></span>
+            </label>
+            <label class="flex items-center justify-between rounded-xl px-3.5 py-3 bg-slate-900/70 ring-1 ring-white/5 cursor-pointer hover:ring-white/10 transition">
+              <span class="flex items-center gap-3 text-sm">
+                <span class="w-7 h-7 rounded-lg bg-amber-500/15 text-amber-400 flex items-center justify-center"><i class="fa-solid fa-dumpster text-xs"></i></span>
+                Disposal bins
+                <span id="count-disposal" class="text-xs text-slate-500 tabular-nums">0</span>
+              </span>
+              <span class="switch"><input type="checkbox" checked onchange="toggleLayer('disposal', this.checked)"><span></span></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- SMS summary -->
+        <section class="rounded-2xl p-4 bg-slate-900/70 ring-1 ring-white/5">
+          <div class="flex items-center justify-between">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">SMS Gateway</h2>
+            <span id="sms-status-pill" class="text-[10px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/30">Active</span>
+          </div>
+          <div class="mt-3 flex items-center justify-between">
+            <div>
+              <p class="text-[11px] text-slate-500">Supervisor</p>
+              <p id="display-phone-num" class="font-mono text-sm text-slate-200">--</p>
+            </div>
+            <button onclick="openModal('sms-modal')" class="text-xs font-medium text-brand-400 hover:text-brand-300 px-2.5 py-1.5 rounded-lg hover:bg-brand-500/10 transition">Configure</button>
+          </div>
+          <div id="sms-alert-tags" class="mt-3 flex flex-wrap gap-1.5"></div>
+        </section>
+
+        <!-- Logs -->
+        <section>
+          <div class="flex items-center justify-between mb-2.5">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">System Log</h2>
+            <button onclick="clearLogs()" class="text-[11px] text-slate-500 hover:text-slate-300 transition">Clear</button>
+          </div>
+          <div id="logs-container" class="bg-black/40 ring-1 ring-white/5 rounded-xl p-3 h-44 overflow-y-auto font-mono text-[11px] leading-relaxed space-y-1"></div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- ==================== MAP ==================== -->
+    <main class="flex-1 relative min-h-0 h-full">
+      <div id="map" class="absolute inset-0 w-full h-full"></div>
+
+      <!-- Legend -->
+      <div class="absolute top-4 left-4 z-[500] bg-slate-950/85 backdrop-blur-md ring-1 ring-white/10 rounded-xl px-3 py-2.5 text-[11px] space-y-1.5 shadow-xl">
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-brand-500"></span> Robot</div>
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded bg-indigo-500"></span> House Pin (10m Zone)</div>
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded bg-emerald-600"></span> Charging dock</div>
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded bg-amber-600"></span> Disposal bin</div>
+      </div>
+
+      <!-- Placement banner -->
+      <div id="placement-banner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-[600] bg-brand-600 text-white text-sm font-medium pl-4 pr-2 py-2 rounded-full shadow-xl flex items-center gap-3">
+        <i class="fa-solid fa-crosshairs"></i>
+        <span id="placement-text">Click the map to place the station</span>
+        <button onclick="cancelPlacement()" class="text-xs bg-white/20 hover:bg-white/30 px-2.5 py-1 rounded-full transition">Cancel</button>
+      </div>
+
+      <!-- Control dock -->
+      <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-[1000] bg-[#0b1120]/90 backdrop-blur-md border border-slate-700/80 px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3">
+        <!-- Standby Pill -->
+        <div class="flex items-center gap-2 pr-3 border-r border-slate-700">
+          <span id="mission-dot" class="w-2 h-2 rounded-full bg-slate-400"></span>
+          <span id="mission-status-text" class="text-xs font-semibold text-slate-200">Awaiting Pi</span>
+        </div>
+        <!-- Commands Button -->
+        <button onclick="openModal('command-modal')" class="px-3.5 py-1.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-semibold shadow transition flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-terminal"></i> Commands
+        </button>
+        <!-- Current Location Button -->
+        <button onclick="locateCurrentDevice()" title="Show current device or browser location" class="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-location-crosshairs text-brand-400"></i> Current Location
+        </button>
+        <!-- Pin House Button -->
+        <button onclick="beginHousePinPlacement()" title="Pin House Location on Map" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow transition flex items-center gap-1.5 cursor-pointer">
+          <i class="fa-solid fa-house"></i> Pin House
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <!-- ==================== MODALS ==================== -->
+  <!-- Commands -->
+  <div id="command-modal" class="modal fixed inset-0 bg-black/70 backdrop-blur-sm z-[9999] hidden items-center justify-center p-4" onclick="if(event.target===this)closeModal('command-modal')">
+    <div class="modal-panel bg-slate-900 ring-1 ring-white/10 rounded-2xl w-full max-w-sm shadow-2xl">
+      <div class="flex items-center justify-between px-5 pt-5">
+        <h3 class="font-semibold text-sm flex items-center gap-2"><i class="fa-solid fa-terminal text-brand-400"></i> Robot Commands</h3>
+        <button onclick="closeModal('command-modal')" class="text-slate-500 hover:text-slate-200"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-5 space-y-2">
+        <button onclick="sendCommand('START_CLEANING')" class="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-800/70 hover:bg-slate-800 ring-1 ring-white/5 text-left transition">
+          <span class="w-9 h-9 rounded-lg bg-brand-500/15 text-brand-400 flex items-center justify-center"><i class="fa-solid fa-play"></i></span>
+          <span><span class="block text-sm font-medium">Start autonomous cleaning</span><span class="block text-[11px] text-slate-500">Begin patrol and collection</span></span>
+        </button>
+        <button onclick="sendCommand('RETURN_HOME')" class="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-800/70 hover:bg-slate-800 ring-1 ring-white/5 text-left transition">
+          <span class="w-9 h-9 rounded-lg bg-sky-500/15 text-sky-400 flex items-center justify-center"><i class="fa-solid fa-house-chimney"></i></span>
+          <span><span class="block text-sm font-medium">Return home</span><span class="block text-[11px] text-slate-500">Drive to the House pin</span></span>
+        </button>
+        <button onclick="sendCommand('GO_CHARGING')" class="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-800/70 hover:bg-slate-800 ring-1 ring-white/5 text-left transition">
+          <span class="w-9 h-9 rounded-lg bg-emerald-500/15 text-emerald-400 flex items-center justify-center"><i class="fa-solid fa-charging-station"></i></span>
+          <span><span class="block text-sm font-medium">Go to charging station</span><span class="block text-[11px] text-slate-500">Nearest charging dock</span></span>
+        </button>
+        <button onclick="sendCommand('GO_DISPOSAL')" class="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-800/70 hover:bg-slate-800 ring-1 ring-white/5 text-left transition">
+          <span class="w-9 h-9 rounded-lg bg-amber-500/15 text-amber-400 flex items-center justify-center"><i class="fa-solid fa-dumpster"></i></span>
+          <span><span class="block text-sm font-medium">Go to disposal bin</span><span class="block text-[11px] text-slate-500">Nearest disposal bin</span></span>
+        </button>
+        <button onclick="sendCommand('EMERGENCY_STOP')" class="w-full flex items-center gap-3 p-3 rounded-xl bg-rose-600/90 hover:bg-rose-600 text-left transition mt-3">
+          <span class="w-9 h-9 rounded-lg bg-white/15 text-white flex items-center justify-center"><i class="fa-solid fa-hand"></i></span>
+          <span><span class="block text-sm font-semibold text-white">Emergency stop</span><span class="block text-[11px] text-rose-100/80">Halt all motors immediately</span></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add station -->
+  <div id="station-modal" class="modal fixed inset-0 bg-black/70 backdrop-blur-sm z-[9999] hidden items-center justify-center p-4" onclick="if(event.target===this)closeModal('station-modal')">
+    <form onsubmit="beginPlacement(event)" class="modal-panel bg-slate-900 ring-1 ring-white/10 rounded-2xl w-full max-w-sm shadow-2xl">
+      <div class="flex items-center justify-between px-5 pt-5">
+        <h3 class="font-semibold text-sm flex items-center gap-2"><i class="fa-solid fa-location-dot text-brand-400"></i> Add Station</h3>
+        <button type="button" onclick="closeModal('station-modal')" class="text-slate-500 hover:text-slate-200"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div>
+          <p class="text-xs text-slate-400 mb-2">Type</p>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="cursor-pointer">
+              <input type="radio" name="stype" value="charging" class="peer sr-only" checked>
+              <span class="flex items-center justify-center gap-2 p-2.5 rounded-xl text-xs font-medium ring-1 ring-white/10 text-slate-400 peer-checked:ring-emerald-500/60 peer-checked:bg-emerald-500/10 peer-checked:text-emerald-300 transition">
+                <i class="fa-solid fa-charging-station"></i> Charging dock
+              </span>
+            </label>
+            <label class="cursor-pointer">
+              <input type="radio" name="stype" value="disposal" class="peer sr-only">
+              <span class="flex items-center justify-center gap-2 p-2.5 rounded-xl text-xs font-medium ring-1 ring-white/10 text-slate-400 peer-checked:ring-amber-500/60 peer-checked:bg-amber-500/10 peer-checked:text-amber-300 transition">
+                <i class="fa-solid fa-dumpster"></i> Disposal bin
+              </span>
+            </label>
+          </div>
+        </div>
+        <div>
+          <label for="station-name" class="text-xs text-slate-400 mb-2 block">Name</label>
+          <input id="station-name" required maxlength="60" 
+                 class="w-full bg-slate-950 ring-1 ring-white/10 focus:ring-brand-500 outline-none rounded-xl px-3 py-2.5 text-sm placeholder:text-slate-600">
+        </div>
+        <button type="submit" class="w-full py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2">
+          <i class="fa-solid fa-crosshairs"></i> Pick location on map
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- SMS settings -->
+  <div id="sms-modal" class="modal fixed inset-0 bg-black/70 backdrop-blur-sm z-[9999] hidden items-center justify-center p-4" onclick="if(event.target===this)closeModal('sms-modal')">
+    <form onsubmit="saveSms(event)" class="modal-panel bg-slate-900 ring-1 ring-white/10 rounded-2xl w-full max-w-sm shadow-2xl">
+      <div class="flex items-center justify-between px-5 pt-5">
+        <h3 class="font-semibold text-sm flex items-center gap-2"><i class="fa-solid fa-comment-sms text-brand-400"></i> SMS Alerts</h3>
+        <button type="button" onclick="closeModal('sms-modal')" class="text-slate-500 hover:text-slate-200"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div>
+          <label for="sms-phone" class="text-xs text-slate-400 mb-2 block">Supervisor mobile number</label>
+          <input id="sms-phone" type="tel" required placeholder="+63 9XX XXX XXXX"
+                 class="w-full bg-slate-950 ring-1 ring-white/10 focus:ring-brand-500 outline-none rounded-xl px-3 py-2.5 text-sm font-mono placeholder:text-slate-600">
+        </div>
+        <div class="space-y-1 rounded-xl ring-1 ring-white/5 divide-y divide-white/5">
+          <label class="flex items-center justify-between px-3 py-2.5 text-sm cursor-pointer"><span>Low battery</span><span class="switch"><input id="sms-battery" type="checkbox"><span></span></span></label>
+          <label class="flex items-center justify-between px-3 py-2.5 text-sm cursor-pointer"><span>Bin full</span><span class="switch"><input id="sms-bin" type="checkbox"><span></span></span></label>
+          <label class="flex items-center justify-between px-3 py-2.5 text-sm cursor-pointer"><span>Emergency events</span><span class="switch"><input id="sms-emergency" type="checkbox"><span></span></span></label>
+        </div>
+        <button type="submit" class="w-full py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-semibold transition">Save settings</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- QR pairing -->
+  <div id="qr-modal" class="modal fixed inset-0 bg-black/70 backdrop-blur-sm z-[9999] hidden items-center justify-center p-4" onclick="if(event.target===this)closeModal('qr-modal')">
+    <div class="modal-panel bg-slate-900 ring-1 ring-white/10 rounded-2xl w-full max-w-xs shadow-2xl text-center p-6 space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="font-semibold text-sm flex items-center gap-2"><i class="fa-solid fa-qrcode text-brand-400"></i> QR Pairing</h3>
+        <button onclick="closeModal('qr-modal')" class="text-slate-500 hover:text-slate-200"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <p class="text-xs text-slate-400">Scan with the CleanTrail companion app to link this unit.</p>
+      <div class="bg-white p-3 rounded-2xl inline-block">
+        <img id="qr-img" src="" alt="Pairing QR code" class="w-44 h-44 object-contain" />
+      </div>
+      <p class="text-[11px] font-mono text-brand-400 bg-slate-950 py-1.5 rounded-lg ring-1 ring-white/5">Cleantrail</p>
+    </div>
+  </div>
+
+  <!-- Toasts -->
+  <div id="toasts" class="fixed top-20 right-4 z-[10000] space-y-2 w-72"></div>
+
+  <!-- ==================== SCRIPT ==================== -->
+  <script>
+    const storage = {
+      get(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } },
+      set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
+    };
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    const COLORS = { ok: '#10b981', warn: '#f59e0b', bad: '#f43f5e' };
+    const $ = id => document.getElementById(id);
+
+    let map, robotMarker, houseMarker = null, houseCircle = null, chargingLayerGroup, disposalLayerGroup;
+    let showChargingLayer = true, showDisposalLayer = true;
+    let pendingStationData = null;
+    let pendingHousePlacement = false;
+    let mouseMoveHandler = null;
+
+    const mapBounds = L.latLngBounds(
+      L.latLng(14.5877, 120.6149), 
+      L.latLng(15.3729, 121.4205)  
+    );
+
+    let robotState = { lat: 14.8430, lng: 120.8110, heading: 0, speed: 0, battery: null, binLevel: null, charging: false, status: 'Awaiting Pi', satellites: 0, gpsFix: false };
+    let houseLocation = storage.get('cleantrail_house_location', null);
+
+    let chargingStations = storage.get('cleantrail_charging_stations', []);
+    let disposalStations = storage.get('cleantrail_disposal_stations', []);
+    let smsConfig = storage.get('cleantrail_sms_config', { phone: '+63 927 196 3742', batteryAlert: true, binAlert: true, emergencyAlert: true });
+
+    function initMap() {
+      map = L.map('map', { 
+        zoomControl: false,
+        maxBounds: mapBounds,
+        maxBoundsViscosity: 1.0,
+        minZoom: 11,
+        maxZoom: 21
+      }).setView([robotState.lat, robotState.lng], 16);
+
+      L.control.zoom({ position: 'topright' }).addTo(map);
+
+      const gOpts = { maxZoom: 21, subdomains: ['mt0','mt1','mt2','mt3'], attribution: 'Map data &copy; Google' };
+      const googleHybrid = L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', gOpts);
+      const googleStreet = L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', gOpts);
+      const esriSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, attribution: 'Tiles &copy; Esri' });
+      
+      googleHybrid.addTo(map);
+      L.control.layers({
+        'Google Hybrid': googleHybrid,
+        'Google Street': googleStreet,
+        'Esri Satellite': esriSat
+      }, null, { position: 'topright' }).addTo(map);
+
+      chargingLayerGroup = L.layerGroup().addTo(map);
+      disposalLayerGroup = L.layerGroup().addTo(map);
+
+      renderHouseMarker();
+
+      const robotIcon = L.divIcon({
+        className: '',
+        html: `<div class="robot-wrap"><div class="robot-heading"></div><div class="robot-core"><i class="fa-solid fa-robot text-white text-sm"></i></div></div>`,
+        iconSize: [44, 44], iconAnchor: [22, 22]
+      });
+      robotMarker = L.marker([robotState.lat, robotState.lng], { icon: robotIcon, zIndexOffset: 1000 }).addTo(map);
+      robotMarker.bindPopup('<b>Cleantrail</b><br><span style="color:#94a3b8">Awaiting Raspberry Pi telemetry...</span>');
+
+      map.on('click', e => {
+        if (pendingHousePlacement) {
+          houseLocation = { lat: e.latlng.lat, lng: e.latlng.lng, name: 'Base Station House' };
+          storage.set('cleantrail_house_location', houseLocation);
+          renderHouseMarker();
+          pendingHousePlacement = false;
+          cancelPlacement(true);
+          toast('House pin added successfully!', 'ok');
+          appendLog(`House pin placed at ${houseLocation.lat.toFixed(4)}, ${houseLocation.lng.toFixed(4)}`, 'ok');
+          renderStations();
+          return;
+        }
+
+        if (!pendingStationData) return;
+
+        if (!houseLocation) {
+          toast('Error: Please place the House Pin first!', 'bad');
+          appendLog('Blocked station addition: House Pin is missing.', 'bad');
+          cancelPlacement(true);
+          return;
+        }
+
+        const houseLatLng = L.latLng(Number(houseLocation.lat), Number(houseLocation.lng));
+        const distToHouse = houseLatLng.distanceTo(e.latlng);
+
+        // STRICT 10-METER ALLOWANCE CHECK
+        if (distToHouse > 10) {
+          toast(`Error: Station is ${distToHouse.toFixed(1)}m away! Must be within 10m of the house.`, 'bad');
+          appendLog(`Blocked station "${pendingStationData.name}": Out of bounds (${distToHouse.toFixed(1)}m from house)`, 'bad');
+          return; // Keep placement mode active
+        }
+
+        const station = { id: 'station-' + Date.now(), name: pendingStationData.name, lat: e.latlng.lat, lng: e.latlng.lng };
+        
+        if (pendingStationData.type === 'charging') {
+          chargingStations.push(station);
+          storage.set('cleantrail_charging_stations', chargingStations);
+          appendLog(`Added charging dock "${station.name}" (${distToHouse.toFixed(1)}m from house)`, 'ok');
+        } else {
+          disposalStations.push(station);
+          storage.set('cleantrail_disposal_stations', disposalStations);
+          appendLog(`Added disposal bin "${station.name}" (${distToHouse.toFixed(1)}m from house)`, 'ok');
+        }
+
+        toast(`Placed "${station.name}" successfully (${distToHouse.toFixed(1)}m)!`, 'ok');
+        cancelPlacement(true);
+        renderStations();
+      });
+
+      renderStations();
+      initInstantGeolocation();
+
+      setTimeout(() => { map.invalidateSize(); }, 200);
+    }
+
+    function initInstantGeolocation() {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            robotState.lat = lat;
+            robotState.lng = lng;
+            map.setView([lat, lng], 17);
+            robotMarker.setLatLng([lat, lng]);
+            appendLog(`Centered on current location: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, 'ok');
+          },
+          err => {
+            appendLog('Browser location unavailable, waiting for Raspberry Pi telemetry.', 'muted');
+          },
+          { timeout: 6000, enableHighAccuracy: true, maximumAge: 10000 }
+        );
+      }
+    }
+
+    function renderHouseMarker() {
+      if (houseMarker) {
+        map.removeLayer(houseMarker);
+        houseMarker = null;
+      }
+      if (houseCircle) {
+        map.removeLayer(houseCircle);
+        houseCircle = null;
+      }
+
+      if (!houseLocation) return;
+
+      const houseIcon = L.divIcon({
+        className: '',
+        html: `<div style="background:#4f46e5;width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 4px 12px rgba(79,70,229,.5)"><i class="fa-solid fa-house text-white" style="font-size:14px"></i></div>`,
+        iconSize: [34, 34], iconAnchor: [17, 17]
+      });
+      houseMarker = L.marker([Number(houseLocation.lat), Number(houseLocation.lng)], { icon: houseIcon, zIndexOffset: 900 });
+      
+      houseMarker.on('click', ev => {
+        L.DomEvent.stopPropagation(ev);
+        houseMarker.openPopup();
+      });
+
+      houseMarker.bindPopup(`
+        <div style="min-width:160px">
+          <div style="font-weight:600;font-size:13px">${esc(houseLocation.name)}</div>
+          <div style="font-size:11px;color:#a78bfa;margin-top:2px">Base Station / House Pin</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b;margin-top:4px">${Number(houseLocation.lat).toFixed(5)}, ${Number(houseLocation.lng).toFixed(5)}</div>
+          <button onclick="deleteHousePin()" style="margin-top:10px;width:100%;padding:6px;border-radius:8px;background:rgba(244,63,94,.12);color:#fb7185;font-size:11px;font-weight:600;border:1px solid rgba(244,63,94,.3);cursor:pointer">
+            <i class="fa-solid fa-trash"></i> Delete House Pin
+          </button>
+        </div>
+      `).addTo(map);
+
+      houseCircle = L.circle([Number(houseLocation.lat), Number(houseLocation.lng)], {
+        radius: 10,
+        color: '#6366f1',
+        weight: 1.5,
+        dashArray: '4, 4',
+        fillColor: '#6366f1',
+        fillOpacity: 0.15
+      });
+
+      houseCircle.addTo(map);
+    }
+
+    window.deleteHousePin = function() {
+      houseLocation = null;
+      storage.set('cleantrail_house_location', null);
+      renderHouseMarker();
+      map.closePopup();
+      toast('House pin deleted', 'warn');
+      appendLog('House pin deleted', 'warn');
+    }
+
+    function stationIcon(bg, icon) {
+      return L.divIcon({
+        className: '',
+        html: `<div style="background:${bg};width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 4px 10px rgba(0,0,0,.4)"><i class="fa-solid ${icon} text-white" style="font-size:12px"></i></div>`,
+        iconSize: [30, 30], iconAnchor: [15, 15]
+      });
+    }
+
+    function stationPopup(station, type) {
+      const label = type === 'charging' ? '<span style="color:#34d399">Charging dock</span>' : '<span style="color:#fbbf24">Disposal bin</span>';
+      let distText = '';
+      if (houseLocation) {
+        const houseLatLng = L.latLng(Number(houseLocation.lat), Number(houseLocation.lng));
+        const dist = houseLatLng.distanceTo(L.latLng(station.lat, station.lng));
+        distText = `<div style="font-size:10px;color:#a78bfa;margin-top:2px">Distance to House: ${dist.toFixed(1)}m</div>`;
+      }
+      return `<div style="min-width:170px">
+        <div style="font-weight:600;font-size:13px">${esc(station.name)}</div>
+        <div style="font-size:11px;margin-top:2px">${label}</div>
+        ${distText}
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b;margin-top:4px">${station.lat.toFixed(5)}, ${station.lng.toFixed(5)}</div>
+        <button onclick="goToLatLng(${station.lat},${station.lng},'${esc(station.name).replace(/&#39;/g,'')}')" style="margin-top:10px;width:100%;padding:6px;border-radius:8px;background:rgba(34,197,94,.15);color:#4ade80;font-size:11px;font-weight:600;border:1px solid rgba(34,197,94,.35);cursor:pointer">
+          <i class="fa-solid fa-route"></i> Send robot here
+        </button>
+        <button onclick="deleteStation('${esc(station.id)}','${type}')" style="margin-top:10px;width:100%;padding:6px;border-radius:8px;background:rgba(244,63,94,.12);color:#fb7185;font-size:11px;font-weight:600;border:1px solid rgba(244,63,94,.3);cursor:pointer">
+          <i class="fa-solid fa-trash"></i> Delete station
+        </button></div>`;
+    }
+
+    function renderStations() {
+      chargingLayerGroup.clearLayers();
+      disposalLayerGroup.clearLayers();
+      if (showChargingLayer) chargingStations.forEach(s => {
+        const m = L.marker([s.lat, s.lng], { icon: stationIcon('#059669', 'fa-charging-station') });
+        m.on('click', ev => L.DomEvent.stopPropagation(ev));
+        m.bindPopup(stationPopup(s, 'charging'));
+        chargingLayerGroup.addLayer(m);
+      });
+      if (showDisposalLayer) disposalStations.forEach(s => {
+        const m = L.marker([s.lat, s.lng], { icon: stationIcon('#d97706', 'fa-dumpster') });
+        m.on('click', ev => L.DomEvent.stopPropagation(ev));
+        m.bindPopup(stationPopup(s, 'disposal'));
+        disposalLayerGroup.addLayer(m);
+      });
+      $('count-charging').innerText = chargingStations.length;
+      $('count-disposal').innerText = disposalStations.length;
+    }
+
+    window.deleteStation = function(id, type) {
+      if (type === 'charging') {
+        chargingStations = chargingStations.filter(s => s.id !== id);
+        storage.set('cleantrail_charging_stations', chargingStations);
+      } else {
+        disposalStations = disposalStations.filter(s => s.id !== id);
+        storage.set('cleantrail_disposal_stations', disposalStations);
+      }
+      appendLog(`Deleted ${type === 'charging' ? 'charging dock' : 'disposal bin'} ${id}`, 'warn');
+      renderStations();
+      map.closePopup();
+    }
+
+    function toggleLayer(layer, on) {
+      if (layer === 'charging') {
+        showChargingLayer = on;
+      } else {
+        showDisposalLayer = on;
+      }
+      appendLog(`${on ? 'Showing' : 'Hiding'} ${layer} layer`);
+      renderStations();
+    }
+
+    function beginHousePinPlacement() {
+      pendingHousePlacement = true;
+      pendingStationData = null;
+      $('placement-text').innerText = 'Click the map to place the House Pin (Base Station)';
+      $('placement-banner').classList.remove('hidden');$('map').style.cursor = 'crosshair';
+      if (mouseMoveHandler) map.off('mousemove', mouseMoveHandler);
+      appendLog('Click map to place House pin...', 'info');
+    }
+
+    function beginPlacement(e) {
+      e.preventDefault();
+
+      if (!houseLocation) {
+        closeModal('station-modal');
+        toast('Please place the House Pin first!', 'bad');
+        appendLog('Attempted to add station without a House Pin', 'bad');
+        return;
+      }
+
+      const type = document.querySelector('input[name="stype"]:checked').value;
+      const name = $('station-name').value.trim();
+      if (!name) return;
+      pendingStationData = { type, name };
+      pendingHousePlacement = false;
+      closeModal('station-modal');
+      $('station-name').value = '';
+      
+      $('placement-banner').classList.remove('hidden');$('map').style.cursor = 'crosshair';
+
+      if (mouseMoveHandler) map.off('mousemove', mouseMoveHandler);
+      mouseMoveHandler = ev => {
+        if (!houseLocation || !pendingStationData) return;
+        const dist = L.latLng(Number(houseLocation.lat), Number(houseLocation.lng)).distanceTo(ev.latlng);
+        const ok = dist <= 10;
+        $('placement-text').innerHTML = `Place "${esc(pendingStationData.name)}" — Distance: <span style="font-family:monospace;font-weight:bold;color:${ok ? '#4ade80' : '#f87171'}">${dist.toFixed(1)}m</span> (Max 10m)`;
+      };
+      map.on('mousemove', mouseMoveHandler);
+    }
+
+    function cancelPlacement(silent) {
+      if (mouseMoveHandler) {
+        map.off('mousemove', mouseMoveHandler);
+        mouseMoveHandler = null;
+      }
+      if ((pendingStationData || pendingHousePlacement) && !silent) appendLog('Placement cancelled');
+      pendingStationData = null;
+      pendingHousePlacement = false;
+      $('placement-banner').classList.add('hidden');$('map').style.cursor = '';
+    }
+
+    function setConnection(state) {
+      const cfg = {
+        live:    { text: 'Connected (Raspberry Pi)', pill: 'bg-emerald-500/10 ring-emerald-500/30 text-emerald-300', dot: 'bg-emerald-400' },
+        waiting: { text: 'Waiting for Pi Stream', pill: 'bg-amber-500/10 ring-amber-500/30 text-amber-300', dot: 'bg-amber-400' },
+        offline: { text: 'Disconnected', pill: 'bg-rose-500/10 ring-rose-500/30 text-rose-300', dot: 'bg-rose-400' }
+      }[state];
+      $('conn-pill').className = `hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ring-1 ${cfg.pill}`;
+      $('conn-dot').className = `relative inline-flex rounded-full h-2 w-2 ${cfg.dot}`;
+      $('conn-ping').className = `absolute inline-flex h-full w-full rounded-full ${cfg.dot} opacity-75 ${state === 'offline' ? '' : 'animate-ping'}`;
+      $('conn-text').innerText = cfg.text;
+    }
+
+    function setMissionStatus(status) {
+      const s = status.toLowerCase();
+      const color = s.includes('emergency') || s.includes('error') ? COLORS.bad
+                  : s.includes('return') || s.includes('charg') ? '#38bdf8'
+                  : s.includes('clean') ? COLORS.ok : '#64748b';
+      $('mission-status-text').innerText = status;
+      $('mission-dot').style.background = color;
+      $('status-pill').innerText = status;
+      $('status-pill').style.color = color;
+    }
+
+    function locateCurrentDevice() {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            robotState.lat = lat;
+            robotState.lng = lng;
+            map.flyTo([lat, lng], 19, { duration: 0.8 });
+            toast('Centered on current location', 'ok');
+            appendLog(`Centered on browser geolocation: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, 'ok');
+          },
+          err => {
+            toast('Geolocation unavailable', 'warn');
+          },
+          { timeout: 8000, enableHighAccuracy: true }
+        );
+      }
+    }
+
+    function ingestLiveTelemetry(data) {
+      robotState = { ...robotState, ...data };
+      setConnection('live');
+
+      if (robotState.battery != null) {
+        const b = Math.round(robotState.battery);
+        const bColor = b <= 20 ? COLORS.bad : b <= 50 ? COLORS.warn : COLORS.ok;
+        $('battery-val').innerText = b;
+        $('battery-bar').style.width = b + '\%';$('battery-bar').style.background = bColor;
+        const bIcon = b > 85 ? 'full' : b > 60 ? 'three-quarters' : b > 35 ? 'half' : b > 10 ? 'quarter' : 'empty';
+        $('battery-icon').className = `fa-solid fa-battery-${bIcon}`;
+        $('battery-icon').style.color = bColor;
+        $('battery-status-text').innerHTML = robotState.charging
+          ? '<i class="fa-solid fa-bolt"></i> Charging'
+          : b <= 20 ? '<i class="fa-solid fa-triangle-exclamation"></i> Low — return to dock'
+          : '<i class="fa-solid fa-plug-circle-check"></i> On battery';
+        $('battery-status-text').style.color = robotState.charging ? '#38bdf8' : b <= 20 ? bColor : '';
+      }
+
+      if (robotState.binLevel != null) {
+        const bin = Math.round(robotState.binLevel);
+        const binColor = bin >= 90 ? COLORS.bad : bin >= 70 ? COLORS.warn : COLORS.ok;
+        $('bin-val').innerText = bin;
+        $('bin-bar').style.width = bin + '\%';$('bin-bar').style.background = binColor;
+        $('bin-status-text').innerHTML = bin >= 90 ? '<i class="fa-solid fa-triangle-exclamation"></i> Full — empty now'
+          : bin >= 70 ? '<i class="fa-solid fa-circle-exclamation"></i> Nearly full'
+          : '<i class="fa-solid fa-circle-check"></i> Capacity OK';
+        $('bin-status-text').style.color = bin >= 70 ? binColor : '';
+      }
+
+      if (robotState.heading != null) {
+        const h = Math.round(robotState.heading) % 360;
+        $('heading-val').innerText = `${h}° ${['N','NE','E','SE','S','SW','W','NW'][Math.round(h / 45) % 8]}`;
+        $('compass-needle').style.transform = `rotate(${h}deg)`;
+      }
+
+      if (robotState.speed != null) {
+        $('speed-val').innerText = `${Number(robotState.speed).toFixed(2)} m/s`;
+      }
+
+      if (robotState.lat != null && robotState.lng != null) {
+        $('coords-val').innerText = `${robotState.lat.toFixed(5)}, ${robotState.lng.toFixed(5)}`;
+        if (robotMarker) {
+          robotMarker.setLatLng([robotState.lat, robotState.lng]);
+          const el = robotMarker.getElement();
+          if (el && robotState.heading != null) {
+            el.querySelector('.robot-heading').style.transform = `rotate(${Math.round(robotState.heading)}deg)`;
+          }
+          robotMarker.setPopupContent(`<b>Cleantrail</b><br><span style="color:#94a3b8">${esc(robotState.status)}</span>`);
+        }
+      }
+
+      const sats = robotState.satellites;
+      const hasFix = robotState.gpsFix ?? (sats == null ? false : sats >= 4);
+      $('gps-status-val').innerHTML = `<i class="fa-solid fa-satellite-dish"></i> ${hasFix ? '3D fix' : 'No fix'}${sats != null ? ` · ${sats}` : ''}`;
+      $('gps-status-val').style.color = hasFix ? COLORS.ok : COLORS.warn;
+
+      if (robotState.status) setMissionStatus(robotState.status);
+      $('last-update').innerHTML = `<i class="fa-regular fa-clock"></i> Updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    // ==================== MQTT (must match the Pi) ====================
+    const MQTT_URL = 'wss://broker.hivemq.com:8884/mqtt';
+    const TOPIC_PREFIX = 'cleantrail-756746b0';   // keep private: anyone with it can command the robot
+    const T_TELEMETRY = TOPIC_PREFIX + '/telemetry';
+    const T_COMMANDS  = TOPIC_PREFIX + '/commands';
+    let mqttClient = null;
+
+    function connectMqtt() {
+      setConnection('waiting');
+      mqttClient = mqtt.connect(MQTT_URL, { clientId: 'cleantrail-web-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
+      mqttClient.on('connect', () => { appendLog('Broker connected. Waiting for the robot...', 'ok'); mqttClient.subscribe(T_TELEMETRY); });
+      mqttClient.on('reconnect', () => setConnection('waiting'));
+      mqttClient.on('close', () => setConnection('offline'));
+      mqttClient.on('error', e => appendLog('MQTT error: ' + e.message, 'bad'));
+      mqttClient.on('message', (t, payload) => {
+        try { handleTelemetry(JSON.parse(payload.toString())); } catch (e) { appendLog('Bad telemetry message', 'warn'); }
+      });
+    }
+
+    // Pi sends: lat, lon, heading, sats, fix, navigating, dist, arrived (+ optional speed, battery, binLevel)
+    function handleTelemetry(d) {
+      const hasFix = !!(d.fix && d.lat != null && d.lon != null);
+      const data = { heading: d.heading, satellites: d.sats ?? 0, gpsFix: hasFix };
+      if (hasFix) { data.lat = d.lat; data.lng = d.lon; }
+      if (d.speed != null) data.speed = d.speed;
+      if (d.battery != null) data.battery = d.battery;
+      if (d.binLevel != null) data.binLevel = d.binLevel;
+      data.status = d.arrived ? 'Arrived'
+                  : d.navigating ? 'Returning' + (d.dist != null ? ` (${d.dist} m left)` : '')
+                  : (d.status || (hasFix ? 'Standby' : 'Waiting for GPS fix'));
+      ingestLiveTelemetry(data);
+    }
+
+    function publishCmd(obj) {
+      if (!mqttClient || !mqttClient.connected) { toast('Not connected to the broker', 'bad'); appendLog('Command not sent: no broker connection', 'bad'); return false; }
+      mqttClient.publish(T_COMMANDS, JSON.stringify(obj));
+      appendLog('Command sent: ' + JSON.stringify(obj), 'info');
+      return true;
+    }
+
+    function goToLatLng(lat, lng, name) {
+      if (!robotState.gpsFix) { toast('Robot has no GPS fix yet', 'warn'); return; }
+      if (publishCmd({ cmd: 'goto', lat: lat, lon: lng, name: name })) {
+        setMissionStatus('Returning to ' + name);
+        toast('Sending robot to ' + name, 'ok');
+        map.closePopup();
+      }
+    }
+
+    function goNearest(list, label) {
+      if (!list.length) { toast('No ' + label + ' added yet', 'warn'); return; }
+      if (!robotState.gpsFix) { toast('Robot has no GPS fix yet', 'warn'); return; }
+      const me = L.latLng(robotState.lat, robotState.lng);
+      let best = list[0], bd = Infinity;
+      list.forEach(st => { const d = me.distanceTo(L.latLng(st.lat, st.lng)); if (d < bd) { bd = d; best = st; } });
+      goToLatLng(best.lat, best.lng, best.name);
+    }
+
+    function sendCommand(cmd) {
+      closeModal('command-modal');
+      if (cmd === 'EMERGENCY_STOP') { publishCmd({ cmd: 'stop' }); setMissionStatus('Emergency Stopped'); toast('Emergency stop sent', 'bad'); }
+      else if (cmd === 'START_CLEANING') { if (publishCmd({ cmd: 'start_cleaning' })) setMissionStatus('Autonomous Cleaning'); }
+      else if (cmd === 'RETURN_HOME') {
+        if (!houseLocation) { toast('Place the House pin first', 'warn'); return; }
+        goToLatLng(Number(houseLocation.lat), Number(houseLocation.lng), 'House');
+      }
+      else if (cmd === 'GO_CHARGING') goNearest(chargingStations, 'charging stations');
+      else if (cmd === 'GO_DISPOSAL') goNearest(disposalStations, 'disposal bins');
+    }
+
+    function renderSmsSummary() {
+      $('display-phone-num').innerText = smsConfig.phone;
+      const tags = [['batteryAlert', 'Low battery'], ['binAlert', 'Bin full'], ['emergencyAlert', 'Emergency']]
+        .filter(([k]) => smsConfig[k])
+        .map(([, label]) => `<span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">${label}</span>`);
+      $('sms-alert-tags').innerHTML = tags.length ? tags.join('') : '<span class="text-[11px] text-slate-500">No alerts enabled</span>';
+      const active = tags.length > 0;
+      $('sms-status-pill').innerText = active ? 'Active' : 'Muted';
+      $('sms-status-pill').className = `text-[10px] font-medium px-2 py-0.5 rounded-full ring-1 ${active ? 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/30' : 'bg-slate-800 text-slate-400 ring-white/10'}`;
+    }
+
+    function fillSmsForm() {
+      $('sms-phone').value = smsConfig.phone;
+      $('sms-battery').checked = smsConfig.batteryAlert;
+      $('sms-bin').checked = smsConfig.binAlert;
+      $('sms-emergency').checked = smsConfig.emergencyAlert;
+    }
+
+    function saveSms(e) {
+      e.preventDefault();
+      smsConfig = {
+        phone: $('sms-phone').value.trim(),
+        batteryAlert: $('sms-battery').checked,
+        binAlert: $('sms-bin').checked,
+        emergencyAlert: $('sms-emergency').checked
+      };
+      storage.set('cleantrail_sms_config', smsConfig);
+      renderSmsSummary();
+      appendLog(`SMS settings saved (${smsConfig.phone})`, 'ok');
+      toast('SMS settings saved', 'ok');
+      closeModal('sms-modal');
+    }
+
+    function openQrModal() {
+      const pairingData = `cleantrail://pair?unit=cleantrail-01&host=${encodeURIComponent(window.location.host)}`;
+      $('qr-img').src = `https://api.qrserver.com/v1/create-qr-code/?size=176x176&data=${encodeURIComponent(pairingData)}`;
+      openModal('qr-modal');
+    }
+
+    function openModal(id) {
+      if (id === 'sms-modal') fillSmsForm();
+      const m = $(id);
+      m.classList.remove('hidden'); m.classList.add('flex');
+      const input = m.querySelector('input[type="text"], input:not([type]), input[type="tel"]');
+      if (input) setTimeout(() => input.focus(), 50);
+    }
+    function closeModal(id) { const m = $(id); m.classList.add('hidden'); m.classList.remove('flex'); }
+
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      document.querySelectorAll('.modal.flex').forEach(m => closeModal(m.id));
+      if (pendingStationData || pendingHousePlacement) cancelPlacement();
+    });
+
+    const LOG_COLORS = { info: 'text-slate-300', ok: 'text-emerald-400', warn: 'text-amber-400', bad: 'text-rose-400', muted: 'text-slate-500' };
+    function appendLog(message, level = 'info') {
+      const c = $('logs-container');
+      const row = document.createElement('div');
+      row.className = `flex gap-2 ${LOG_COLORS[level] || LOG_COLORS.info}`;
+      const time = document.createElement('span');
+      time.className = 'text-slate-600 shrink-0';
+      time.innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const msg = document.createElement('span');
+      msg.innerText = message;
+      row.append(time, msg);
+      c.appendChild(row);
+      c.scrollTop = c.scrollHeight;
+    }
+    function clearLogs() { $('logs-container').innerHTML = ''; appendLog('Logs cleared', 'muted'); }
+
+    function toast(message, level = 'info') {
+      const icon = { ok: 'fa-circle-check text-emerald-400', bad: 'fa-circle-exclamation text-rose-400', warn: 'fa-triangle-exclamation text-amber-400', info: 'fa-circle-info text-sky-400' }[level] || 'fa-circle-info text-sky-400';
+      const t = document.createElement('div');
+      t.className = 'toast bg-slate-900 ring-1 ring-white/10 rounded-xl px-4 py-3 text-sm shadow-2xl flex items-center gap-3';
+      t.innerHTML = `<i class="fa-solid ${icon}"></i><span></span>`;
+      t.querySelector('span').innerText = message;
+      $('toasts').appendChild(t);
+      setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3200);
+    }
+
+    function centerOnRobot() { 
+      if (map && robotMarker) {
+        map.flyTo([robotState.lat, robotState.lng], 19, { duration: 0.6 });
+        robotMarker.openPopup();
+        toast('Centered on CleanTrail location', 'ok');
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initMap();
+      connectMqtt();
+      renderSmsSummary();
+      appendLog('Cleantrail IoT client initialized', 'muted');
+      appendLog('Waiting for Raspberry Pi telemetry connection...', 'info');
+    });
+  </script>
+</body>
+</html>
